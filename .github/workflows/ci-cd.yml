@@ -1,0 +1,157 @@
+name: GitHub Actions Training Quiz
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_REPOSITORY: github-actions-quiz
+
+jobs:
+  ci:
+    name: CI - Build Package and Docker Image
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.image_meta.outputs.image_tag }}
+      full_image: ${{ steps.image_meta.outputs.full_image }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Print all environment variables
+        run: |
+          echo "===== Current Environment Variables ====="
+          printenv | sort
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install build
+
+      - name: Compile Python source
+        run: |
+          python -m compileall app.py
+
+      - name: Package Python project
+        run: |
+          python -m build
+          echo "===== Package Output ====="
+          ls -lah dist/
+
+      - name: Build Docker image
+        run: |
+          docker build -t github-actions-quiz:build .
+
+      - name: Generate timestamp and image information
+        id: image_meta
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d%H%M%S")
+          FULL_IMAGE="${{ vars.DOCKER_USERNAME }}/${IMAGE_REPOSITORY}:${TIMESTAMP}"
+
+          echo "Generated timestamp: ${TIMESTAMP}"
+          echo "Full image name: ${FULL_IMAGE}"
+
+          echo "image_tag=${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+          echo "full_image=${FULL_IMAGE}" >> "$GITHUB_OUTPUT"
+
+          echo "IMAGE_TAG=${TIMESTAMP}" >> "$GITHUB_ENV"
+          echo "FULL_IMAGE=${FULL_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Tag Docker image with timestamp
+        run: |
+          docker tag github-actions-quiz:build "${FULL_IMAGE}"
+          echo "Tagged image: ${FULL_IMAGE}"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push Docker image
+        run: |
+          docker push "${FULL_IMAGE}"
+
+      - name: Save Docker image to TAR archive
+        run: |
+          docker save "${FULL_IMAGE}" -o image.tar
+          echo "===== Docker TAR Archive ====="
+          ls -lh image.tar
+
+      - name: Upload Docker TAR artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-image-tar
+          path: image.tar
+
+      - name: Print final image version
+        run: |
+          echo "Final image: ${FULL_IMAGE}"
+
+          echo "## Final Image Version" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${FULL_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: CD - ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    needs: ci
+
+    strategy:
+      matrix:
+        environment:
+          - DEV
+          - PROD
+
+    environment: ${{ matrix.environment }}
+
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-image-tar
+          path: downloaded-image
+
+      - name: Verify downloaded archive
+        run: |
+          echo "===== Downloaded Files ====="
+          ls -lah downloaded-image/
+
+      - name: Load Docker image
+        run: |
+          docker load -i downloaded-image/image.tar
+
+      - name: Retag image with environment suffix
+        run: |
+          ORIGINAL_IMAGE="${{ needs.ci.outputs.full_image }}"
+          NEW_IMAGE="${ORIGINAL_IMAGE}-${{ vars.suffix }}"
+
+          echo "Environment: ${{ matrix.environment }}"
+          echo "Suffix: ${{ vars.suffix }}"
+          echo "Original image: ${ORIGINAL_IMAGE}"
+          echo "New image: ${NEW_IMAGE}"
+
+          docker tag "${ORIGINAL_IMAGE}" "${NEW_IMAGE}"
+
+          echo "## ${{ matrix.environment }} Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Original: \`${ORIGINAL_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Retagged: \`${NEW_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: List all local Docker images
+        run: |
+          echo "===== All Local Docker Images ====="
+          docker image ls
