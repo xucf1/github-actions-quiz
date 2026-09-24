@@ -154,4 +154,4 @@ jobs:
       - name: List all local Docker images
         run: |
           echo "===== All Local Docker Images ====="
-          docker image ls
+          docker image ls --all
